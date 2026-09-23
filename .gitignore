@@ -1,0 +1,16 @@
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.log
+*.trc
+*.dll
+*.so
+*.dylib
+*.whl
+nwrfcsdk/
+.firecrawl/
+.pytest_cache/

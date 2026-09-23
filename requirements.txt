@@ -1,0 +1,5 @@
+# Direct runtime dependencies; pip installs their transitive dependencies.
+fastmcp>=2.10,<3
+python-dotenv>=1.0,<2
+# Exact pin required: upstream releases are yanked (no longer maintained).
+pyrfc==3.3.1
