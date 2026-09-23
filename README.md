@@ -16,7 +16,7 @@ Python MCP-сервер для чтения SAP через RFC. Транспор
 
 - Windows x64 и CPython **3.11 или 3.12 x64**: для этих версий есть готовые Windows wheels PyRFC 3.3.1 на [PyPI](https://pypi.org/project/pyrfc/3.3.1/#files).
 - Git для клонирования приватного репозитория с авторизацией GitHub.
-- SAP NetWeaver RFC SDK 7.50 x64, полученный отдельно через [SAP Support Portal](https://support.sap.com/nwrfcsdk). Нужны права на скачивание. SDK не входит в pip-пакеты и этот репозиторий.
+- SAP NetWeaver RFC SDK 7.50 x64. Архив **7.50 PL18 для Windows x64** включён в каталог `vendor/` этого приватного репозитория. SDK не входит в pip-пакеты; другие платформы и версии доступны через [SAP Support Portal](https://support.sap.com/nwrfcsdk) при наличии прав на скачивание.
 - Windows runtime Visual C++ 2013 x64 согласно [требованиям PyRFC](https://github.com/SAP-archive/PyRFC#requirements). Другие runtime устанавливайте согласно требованиям выбранного SDK.
 - Сетевой доступ к SAP DEV и Sandbox и RFC-пользователи с правами на используемые функции и таблицы. Права согласуются с Basis; широкие административные права не нужны.
 
@@ -24,11 +24,12 @@ Python MCP-сервер для чтения SAP через RFC. Транспор
 
 ## Установка на Windows (PowerShell)
 
-Установите Python с launcher `py`, Git и runtime. Распакуйте SDK, например в `C:\nwrfc\nwrfcsdk`; внутри должны быть `lib\sapnwrfc.dll`, `lib\sapucum.dll`, остальные поставляемые DLL и каталог `include`.
+Установите Python с launcher `py`, Git и runtime. Архив SDK содержит корневой каталог `nwrfcsdk`; распаковка в `C:\nwrfc` создаст `C:\nwrfc\nwrfcsdk` с `lib\sapnwrfc.dll`, `lib\libsapucum.dll`, остальными DLL и каталогом `include`.
 
 ```powershell
 git clone https://github.com/marikpro-sudo/sap-rfc-mcp.git
 cd sap-rfc-mcp
+Expand-Archive -LiteralPath '.\vendor\nwrfc750P_18-70002755 Win64.zip' -DestinationPath 'C:\nwrfc'
 py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -36,6 +37,36 @@ py -3.12 -m venv .venv
 Copy-Item .env.example .env
 notepad .env
 ```
+
+### Архив SAP RFC SDK в репозитории
+
+Файл: [nwrfc750P_18-70002755 Win64.zip](vendor/nwrfc750P_18-70002755%20Win64.zip).
+
+| Параметр | Значение |
+|---|---|
+| Компонент | SAP NetWeaver RFC SDK |
+| Версия по release notes | 7.50.18 (Patch Level 18) |
+| Платформа | Windows x64; не подходит для Linux/macOS |
+| Размер архива | 22 016 215 байт |
+| SHA-256 | `9D93350F5332E9E57164E9532EDE5DD630374CE5EE23EBD82AE4DB8C64AED717` |
+
+Проверить целостность после клонирования:
+
+```powershell
+Get-FileHash -LiteralPath '.\vendor\nwrfc750P_18-70002755 Win64.zip' -Algorithm SHA256
+```
+
+После распаковки задайте в `.env`:
+
+```dotenv
+SAPNWRFC_HOME=C:/nwrfc/nwrfcsdk
+```
+
+Если SDK уже установлен в `C:\nwrfc\nwrfcsdk`, пропустите распаковку либо выберите другой каталог и измените `SAPNWRFC_HOME`. Команда выше намеренно не использует `-Force`, чтобы не перезаписать существующую установку.
+
+Архив сохранён без изменений, вместе с документацией и условиями SAP в `nwrfcsdk/doc/`. Использование и передача SDK регулируются лицензией SAP; наличие файла в приватном репозитории не предоставляет дополнительных прав. Совместимость PL18 с PyRFC 3.3.1 в рамках этой публикации не проверялась: после настройки выполните проверку импорта ниже, затем тестовый вызов через MCP.
+
+### Python-зависимости и конфигурация
 
 Для Python 3.11 замените `py -3.12` на `py -3.11`. Активация venv не требуется. `pip` устанавливает также транзитивные Python-зависимости; системный SAP SDK и C++ runtime устанавливаются отдельно. Диапазоны FastMCP и python-dotenv ограничивают основные версии, но не являются полным lock-файлом.
 
@@ -108,9 +139,10 @@ cp .env.example .env
 - `sap_rfc_mcp.py` — исходный сервер с вынесенной в окружение конфигурацией и загрузкой DLL SDK на Windows.
 - `requirements.txt` — прямые Python-зависимости.
 - `.env.example` — шаблон без учётных данных.
-- `.gitignore` — исключения для секретов, SDK, окружений и логов.
+- `.gitignore` — исключения для секретов, распакованного SDK, окружений и логов.
+- `vendor/nwrfc750P_18-70002755 Win64.zip` — исходный архив SAP RFC SDK 7.50 PL18 для Windows x64.
 
-Локальный исходник в `C:\nwrfc` не изменяется при подготовке этого репозитория. В публикуемой версии адреса/манданты вынесены в `.env`, а адрес прослушивания по умолчанию изменён на `127.0.0.1`. Логика RFC-инструментов сохранена. SDK, `.env`, журналы и бизнес-данные в Git не включаются.
+Локальный исходник в `C:\nwrfc` не изменяется при подготовке этого репозитория. В публикуемой версии адреса/манданты вынесены в `.env`, а адрес прослушивания по умолчанию изменён на `127.0.0.1`. Логика RFC-инструментов сохранена. В Git включён только указанный архив SDK; распакованные библиотеки, `.env`, журналы и бизнес-данные не включаются.
 
 Проверка синтаксиса без SAP:
 
