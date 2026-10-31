@@ -43,7 +43,7 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 # cmd.exe wrapper: sets encoding variables and appends output to log files.
 $serverLog = Join-Path $logDir 'server.log'
 $errorLog = Join-Path $logDir 'error.log'
-$cmdLine = '/d /s /c ""set PYTHONIOENCODING=utf-8&& set PYTHONUNBUFFERED=1&& "' + $PythonPath + '" -u "' + $ServerPath + '" 1>>"' + $serverLog + '" 2>>"' + $errorLog + '""'
+$cmdLine = '/d /s /c "set PYTHONIOENCODING=utf-8&& set PYTHONUNBUFFERED=1&& "' + $PythonPath + '" -u "' + $ServerPath + '" 1>>"' + $serverLog + '" 2>>"' + $errorLog + '""'
 
 $user = [Security.Principal.WindowsIdentity]::GetCurrent().Name
 $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\cmd.exe') -Argument $cmdLine -WorkingDirectory $serverDir
