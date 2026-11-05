@@ -141,6 +141,76 @@ def _log_read(system: str, table: str, where: str, max_rows: int, rows: int, err
         pass
 
 
+OPTIONS_WIDTH = 72  # RFC_DB_OPT-TEXT = CHAR72; всё длиннее SAP молча обрезает
+
+
+def _split_options(where: str, width: int = OPTIONS_WIDTH) -> list:
+    """Разбивает WHERE на строки OPTIONS для RFC_READ_TABLE (≤ 72 символов каждая).
+
+    SAP склеивает строки OPTIONS, но токен не может переходить через границу строки,
+    поэтому режем только по пробелам и после запятых вне литералов. Литерал '...'
+    (включая экранированные '') никогда не разрывается.
+
+    До вызова RFC проверяет незакрытые кавычки, баланс скобок и токены длиннее 72
+    символов — иначе RFC_READ_TABLE падает дампом SAPSQL_PARSE_ERROR в ST22.
+    """
+    where = where.strip()
+    if not where:
+        return []
+
+    tokens, cur, in_lit, depth = [], "", False, 0
+    i = 0
+    while i < len(where):
+        ch = where[i]
+        if in_lit:
+            cur += ch
+            if ch == "'":
+                if i + 1 < len(where) and where[i + 1] == "'":  # экранированная кавычка ''
+                    cur += "'"
+                    i += 1
+                else:
+                    in_lit = False
+        elif ch == "'":
+            in_lit = True
+            cur += ch
+        elif ch.isspace():  # пробелы/переводы строк вне литерала — разделители
+            if cur:
+                tokens.append(cur)
+            cur = ""
+        elif ch == ",":
+            tokens.append(cur + ",")
+            cur = ""
+        else:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth < 0:
+                    raise ValueError("лишняя закрывающая скобка ')'")
+            cur += ch
+        i += 1
+    if in_lit:
+        raise ValueError("незакрытый литерал: не хватает одинарной кавычки '")
+    if depth:
+        raise ValueError("несбалансированные скобки")
+    if cur:
+        tokens.append(cur)
+
+    rows, line = [], ""
+    for t in tokens:
+        if len(t) > width:
+            raise ValueError(f"токен длиннее {width} символов, его нельзя перенести: {t[:40]}...")
+        cand = f"{line} {t}" if line else t
+        if len(cand) <= width:
+            line = cand
+        else:
+            rows.append({"TEXT": line})
+            line = t
+    if line:
+        rows.append({"TEXT": line})
+    return rows
+
+
 def get_sap_connection(system_name: str) -> Connection:
     """Создает подключение к указанной системе"""
     config = SYSTEMS.get(str(system_name).lower())
@@ -206,10 +276,19 @@ def read_table_data(table_name: str, system: str = "sandbox", max_rows: int = 10
         if max_rows > PROD_MAX_ROWS:
             max_rows = PROD_MAX_ROWS
 
+    # Проверка и разбиение WHERE ДО вызова RFC: кривое условие не должно уйти в SAP дампом
+    try:
+        options = _split_options(where_clause)
+    except ValueError as e:
+        _log_read(system, table_name, where_clause, max_rows, 0, error=f"invalid where: {e}")
+        return (
+            f"⚠️ Некорректный where_clause ({e}). Запрос в SAP не отправлялся.\n"
+            "Литералы — в одинарных кавычках, пробелы вокруг операторов: BUKRS = '1000'."
+        )
+
     try:
         conn = get_sap_connection(system)
         try:
-            options = [{"TEXT": where_clause}] if where_clause else []
             field_list = [{"FIELDNAME": x.strip()} for x in fields.split(",") if x.strip()] if fields else []
             result = conn.call("RFC_READ_TABLE", QUERY_TABLE=table_name, DELIMITER="|",
                                OPTIONS=options, FIELDS=field_list, ROWCOUNT=max_rows)
@@ -238,7 +317,7 @@ def search_tables(pattern: str, system: str = "dev", max_results: int = 10) -> s
         conn = get_sap_connection("dev")
         try:
             result = conn.call("RFC_READ_TABLE", QUERY_TABLE="DD02L", DELIMITER="|",
-                               OPTIONS=[{"TEXT": f"TABNAME LIKE '{mask}' AND AS4LOCAL='A'"}],
+                               OPTIONS=_split_options(f"TABNAME LIKE '{mask}' AND AS4LOCAL = 'A'"),
                                FIELDS=[{"FIELDNAME": "TABNAME"}, {"FIELDNAME": "DDTEXT"}],
                                ROWCOUNT=int(max_results))
         finally:
