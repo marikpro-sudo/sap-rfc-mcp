@@ -17,3 +17,5 @@ nwrfcsdk/
 windows/config.json
 windows/status.json
 windows/logs/
+exports/
+logs/
