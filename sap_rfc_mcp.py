@@ -113,7 +113,23 @@ def _env_int(name: str, default: int) -> int:
 
 
 DATA_SYSTEMS = ("sandbox", "prod")
+
+# Таблицы репозитория, которые можно читать из DEV (бизнес-данных в DEV нет, но запросы,
+# каталог объектов и перекрёстные ссылки новых объектов есть только там).
+# Список закрытый; переопределяется через SAP_DEV_REPO_TABLES (имена через запятую).
+_DEV_REPO_DEFAULT = ("E070,E071,E07T,TADIR,TRDIR,D010INC,TFDIR,ENLFDIR,TSTC,"
+                     "DD02L,DD02T,DD03L,WBCROSSGT,CROSS,DWINACTIV")
+DEV_REPO_TABLES = frozenset(
+    t.strip().upper() for t in (os.getenv("SAP_DEV_REPO_TABLES") or _DEV_REPO_DEFAULT).split(",") if t.strip()
+)
 LIMITS = {
+    "dev": {
+        "inline": _env_int("SAP_LIMIT_INLINE_DEV", 200),
+        "inline_narrow": _env_int("SAP_LIMIT_INLINE_NARROW_DEV", 1_000),
+        "file": _env_int("SAP_LIMIT_FILE_DEV", 20_000),
+        "scan": _env_int("SAP_LIMIT_SCAN_DEV", 200_000),
+        "timeout": _env_int("SAP_TIMEOUT_DEV", 120),
+    },
     "prod": {
         # SAP_PROD_MAX_ROWS — прежнее имя настройки, учитывается для совместимости
         "inline": _env_int("SAP_LIMIT_INLINE_PROD", _env_int("SAP_PROD_MAX_ROWS", 50)),
@@ -136,6 +152,8 @@ WHERE_MAX_LEN = _env_int("SAP_WHERE_MAX_LEN", 1_000)
 EXPORT_DIR = os.path.abspath(os.getenv("SAP_EXPORT_DIR") or os.path.join(BASE_DIR, "exports"))
 EXPORT_KEEP_DAYS = _env_int("SAP_EXPORT_KEEP_DAYS", 30)
 PROD_REQUIRE_WHERE = os.getenv("SAP_PROD_REQUIRE_WHERE", "1") != "0"
+DEV_REQUIRE_WHERE = os.getenv("SAP_DEV_REQUIRE_WHERE", "1") != "0"
+SEARCH_MAX_RESULTS = 200
 
 MAX_GROUP_BY = 3
 MAX_GROUPS_SHOWN = 200
@@ -334,10 +352,16 @@ def _parse_names(value: str, what: str) -> list:
     return result
 
 
-def _check_data_system(system: str) -> str:
+def _check_data_system(system: str, table: str = "") -> str:
     system = str(system).strip().lower()
+    if system == "dev" and table in DEV_REPO_TABLES:
+        return system  # таблица репозитория: читается из DEV (where_clause обязателен)
     if system not in DATA_SYSTEMS:
-        raise ToolError("⚠️ Бизнес-данные читаются из системы 'sandbox' или 'prod'.", "invalid system")
+        raise ToolError(
+            "⚠️ Бизнес-данные читаются из системы 'sandbox' или 'prod'. "
+            "Из 'dev' доступны только таблицы репозитория: " + ", ".join(sorted(DEV_REPO_TABLES)) + ".",
+            "invalid system",
+        )
     if system not in SYSTEMS:
         raise ToolError("⚠️ PROD не настроен в .env этого сервера.", "prod not configured")
     return system
@@ -352,10 +376,12 @@ def _check_policy(system: str, table: str, where: str) -> list:
             "Если доступ действительно нужен — требуется отдельное согласование.",
             "blocked",
         )
-    if system == "prod" and PROD_REQUIRE_WHERE and not where.strip():
+    need_where = (system == "prod" and PROD_REQUIRE_WHERE) or (system == "dev" and DEV_REQUIRE_WHERE)
+    if need_where and not where.strip():
+        example = "TRKORR = 'MHDK900001'" if system == "dev" else "GJAHR = '2026' AND BUKRS = '1000'"
         raise ToolError(
-            "⚠️ Для PROD обязателен where_clause: чтение без фильтра запрещено (во всех режимах). "
-            "Укажи условие WHERE, например: GJAHR = '2026' AND BUKRS = '1000'.",
+            f"⚠️ Для {system.upper()} обязателен where_clause: чтение без фильтра запрещено (во всех режимах). "
+            f"Укажи условие WHERE, например: {example}.",
             "where required",
         )
     if len(where) > WHERE_MAX_LEN:
@@ -742,7 +768,7 @@ def read_table_data(table_name: str, system: str = "sandbox",
     log = {"mode": mode, "fields": fields or ""}
     sys_label = str(system).lower()
     try:
-        system = _check_data_system(system)
+        system = _check_data_system(system, table)
         sys_label = system
         if mode not in ("inline", "file"):
             raise ToolError("⚠️ output может быть 'inline' или 'file'.", "invalid output")
@@ -873,7 +899,7 @@ def aggregate_table_data(table_name: str, system: str = "sandbox", where_clause:
     log = {"mode": "aggregate", "group_by": group_by or "", "measures": measures or "count"}
     sys_label = str(system).lower()
     try:
-        system = _check_data_system(system)
+        system = _check_data_system(system, table)
         sys_label = system
         groups = _parse_names(group_by, "group_by")
         if len(groups) > MAX_GROUP_BY:
@@ -988,25 +1014,66 @@ def aggregate_table_data(table_name: str, system: str = "sandbox", where_clause:
         return f"❌ Ошибка подсчёта {table} ({_conn_label(sys_label)}):\n{e}"
 
 
+_MASK_RE = re.compile(r"^[A-Z0-9_/%]+$")
+_TEXT_LANGS = ("R", "E")  # внутренние коды языков SAP: русский, английский
+
+
 def search_tables(pattern: str, system: str = "dev", max_results: int = 10) -> str:
-    """Ищет таблицы SAP по маске (только DEV)."""
-    mask = pattern.upper().replace("*", "%")
+    """Ищет таблицы SAP по маске (только DEV): имена из DD02L, описания из DD02T."""
+    mask = str(pattern or "").strip().upper().replace("*", "%")
     try:
+        if not _MASK_RE.match(mask):
+            raise ToolError("⚠️ Маска может содержать только буквы, цифры, '_', '/' и '*' (например 'ZMM*').",
+                            "invalid pattern")
+        limit = _to_int(max_results, "max_results")
+        if limit > SEARCH_MAX_RESULTS:
+            raise ToolError(f"⚠️ max_results не больше {SEARCH_MAX_RESULTS}. Сузь маску.", "limit exceeded")
         conn = get_sap_connection("dev")
         try:
-            result = conn.call("RFC_READ_TABLE", QUERY_TABLE="DD02L", DELIMITER="|",
-                               OPTIONS=_split_options(f"TABNAME LIKE '{mask}' AND AS4LOCAL = 'A'"),
-                               FIELDS=[{"FIELDNAME": "TABNAME"}, {"FIELDNAME": "DDTEXT"}],
-                               ROWCOUNT=int(max_results))
+            # В DD02L описаний нет (DDTEXT лежит в DD02T) — читаем двумя запросами.
+            found = conn.call("RFC_READ_TABLE", QUERY_TABLE="DD02L", DELIMITER="|",
+                              OPTIONS=_split_options(f"TABNAME LIKE '{mask}' AND AS4LOCAL = 'A'"),
+                              FIELDS=[{"FIELDNAME": "TABNAME"}, {"FIELDNAME": "TABCLASS"}],
+                              ROWCOUNT=limit)
+            tables = []
+            for row in found.get("DATA", []):
+                parts = [p.strip() for p in row["WA"].split("|")]
+                if parts and parts[0]:
+                    tables.append((parts[0], parts[1] if len(parts) > 1 else ""))
+            texts = {}
+            names = [name for name, _ in tables]
+            try:
+                for i in range(0, len(names), 40):
+                    chunk = ", ".join(f"'{n}'" for n in names[i:i + 40])
+                    langs = ", ".join(f"'{l}'" for l in _TEXT_LANGS)
+                    got = conn.call("RFC_READ_TABLE", QUERY_TABLE="DD02T", DELIMITER="|",
+                                    OPTIONS=_split_options(f"TABNAME IN ( {chunk} ) AND AS4LOCAL = 'A' "
+                                                           f"AND DDLANGUAGE IN ( {langs} )"),
+                                    FIELDS=[{"FIELDNAME": "TABNAME"}, {"FIELDNAME": "DDLANGUAGE"},
+                                            {"FIELDNAME": "DDTEXT"}])
+                    for row in got.get("DATA", []):
+                        parts = row["WA"].split("|", 2)
+                        if len(parts) < 3:
+                            continue
+                        name, lang, text = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                        best = texts.get(name)
+                        if text and (best is None or _TEXT_LANGS.index(lang) < _TEXT_LANGS.index(best[0])):
+                            texts[name] = (lang, text)
+            except Exception:
+                texts = {}  # описания не критичны: имена таблиц уже найдены
         finally:
             conn.close()
+    except ToolError as e:
+        return e.message
     except Exception as e:
         return f"❌ Ошибка поиска таблиц ({_conn_label('dev')}):\n{e}"
-    output = f"🔍 **Таблицы по маске {mask} (DEV)**\n"
-    for row in result.get("DATA", []):
-        parts = row["WA"].split("|")
-        if len(parts) >= 2:
-            output += f"- **{parts[0]}**: {parts[1]}\n"
+    if not tables:
+        return f"🔍 Таблицы по маске {mask} (DEV) не найдены."
+    output = f"🔍 **Таблицы по маске {mask} (DEV)**: {len(tables)}"
+    output += f" (достигнут max_results={limit}, возможно есть ещё)\n" if len(tables) >= limit else "\n"
+    for name, tabclass in tables:
+        text = texts.get(name, ("", ""))[1]
+        output += f"- **{name}** [{tabclass}]" + (f": {text}" if text else "") + "\n"
     return output
 
 
@@ -1018,10 +1085,14 @@ _LIMITS_TEXT = (
     f"file — {_P['file']} / {_S['file']} строк; "
     f"aggregate — просмотр до {_P['scan']} / {_S['scan']} строк. "
     f"Тайм-аут запроса {_P['timeout']} / {_S['timeout']} с. "
-    "Превышение лимита — ошибка, а не обрезание."
+    "Превышение лимита — ошибка, а не обрезание. "
+    f"DEV (только таблицы репозитория): inline — {LIMITS['dev']['inline']} / {LIMITS['dev']['inline_narrow']}, "
+    f"file — {LIMITS['dev']['file']}, aggregate — {LIMITS['dev']['scan']}, тайм-аут {LIMITS['dev']['timeout']} с."
 )
 _COMMON_TEXT = (
-    "system: 'sandbox' — основной источник; 'prod' — только чтение, where_clause обязателен; 'dev' — нет данных. "
+    "system: 'sandbox' — основной источник; 'prod' — только чтение, where_clause обязателен; "
+    "'dev' — бизнес-данных нет, читаются только таблицы репозитория ("
+    + ", ".join(sorted(DEV_REPO_TABLES)) + "), where_clause обязателен. "
     "Таблицы USR*, PA####, BNKA, KNBK, LFBK, PASSWORD, T002* заблокированы везде. "
     f"where_clause — ABAP Open SQL, литералы в одинарных кавычках, до {WHERE_MAX_LEN} символов. "
     "Поля проверяй заранее через get_table_structure (system='dev'). "
@@ -1055,7 +1126,9 @@ mcp.tool(description=(
     + _LIMITS_TEXT + "\n" + _COMMON_TEXT
 ))(aggregate_table_data)
 
-mcp.tool(description="Ищет таблицы SAP по маске имени (например 'Z*'), только в DEV.")(search_tables)
+mcp.tool(description="Ищет таблицы SAP по маске имени (например 'ZMM*'), только в DEV. "
+                     "Возвращает имя, класс таблицы и описание. "
+                     f"max_results — до {SEARCH_MAX_RESULTS}.")(search_tables)
 
 
 if __name__ == "__main__":

@@ -116,6 +116,8 @@ class FakeConnection:
                  "KEYFLAG": k, "REFTABLE": rt, "REFFIELD": rf, "FIELDTEXT": n}
                 for n, (d, it, l, o, k, rt, rf) in FIELDS.items()]}
         assert func == "RFC_READ_TABLE"
+        if p.get("QUERY_TABLE") in ("DD02L", "DD02T"):
+            return fake_ddic(p)
         names = [f["FIELDNAME"] for f in p["FIELDS"]] or list(FIELDS)
         delim = p.get("DELIMITER", "")
         layout, off = [], 0
@@ -140,6 +142,25 @@ class FakeConnection:
                 parts.append(v)
             out.append({"WA": (delim if delim.strip() else "").join(parts).rstrip()})
         return {"FIELDS": layout, "DATA": out}
+
+
+DDIC_TABLES = {"ZMM_A": "TRANSP", "ZMM_B": "INTTAB", "ZSD_C": "TRANSP"}
+DDIC_TEXTS = [("ZMM_A", "E", "Table A"), ("ZMM_A", "R", "Таблица А"), ("ZMM_B", "E", "Structure | B")]
+
+
+def fake_ddic(p):
+    """DD02L / DD02T для search_tables. В DD02L нет DDTEXT — как в настоящем SAP."""
+    names = [f["FIELDNAME"] for f in p["FIELDS"]]
+    where = " ".join(o["TEXT"] for o in p.get("OPTIONS", []))
+    if p["QUERY_TABLE"] == "DD02L":
+        if "DDTEXT" in names:
+            raise RuntimeError("5 (rc=5): key=FIELD_NOT_VALID, message= Number:000")
+        prefix = re.search(r"TABNAME LIKE '([^']*)'", where).group(1).rstrip("%")
+        rows = [{"WA": f"{n}|{c}"} for n, c in sorted(DDIC_TABLES.items()) if n.startswith(prefix)]
+        count = p.get("ROWCOUNT", 0)
+        return {"DATA": rows[:count] if count else rows}
+    wanted = set(re.findall(r"'([^']+)'", where.split("AND")[0]))
+    return {"DATA": [{"WA": f"{n}|{l}|{x}"} for n, l, x in DDIC_TEXTS if n in wanted]}
 
 
 sys.modules["pyrfc"] = types.SimpleNamespace(Connection=FakeConnection)
@@ -212,6 +233,46 @@ class PolicyTests(Base):
     def test_dev_rejected(self):
         self.assertIn("'sandbox' или 'prod'", srv.read_table_data("RBKP", "dev", 5))
         self.assertIn("'sandbox' или 'prod'", srv.aggregate_table_data("RBKP", "dev"))
+        self.assertIn("'sandbox' или 'prod'", srv.read_table_data("RBKP", "dev", 5, "GJAHR = '2026'"))
+        self.assertFalse(FakeSAP.calls, "в SAP не должно уйти ни одного вызова")
+
+    def test_dev_repository_tables(self):
+        for table in ("E070", "E071", "TADIR", "WBCROSSGT", "DWINACTIV"):
+            out = srv.read_table_data(table, "dev", 5, "GJAHR = '2026'", "BELNR,GJAHR")
+            self.assertNotIn("'sandbox' или 'prod'", out)
+            self.assertIn("5100000000", out)
+        self.assertEqual(last_log()["system"], "dev")
+        self.assertIn("Просмотрено строк", srv.aggregate_table_data("E071", "dev", "GJAHR = '2026'", "BLART"))
+
+    def test_dev_requires_where_and_keeps_blocklist(self):
+        self.assertIn("обязателен where_clause", srv.read_table_data("E071", "dev", 5))
+        self.assertIn("обязателен where_clause", srv.read_table_data("E071", "dev", output="file"))
+        self.assertIn("обязателен where_clause", srv.aggregate_table_data("TADIR", "dev"))
+        self.assertIn("'sandbox' или 'prod'", srv.read_table_data("USR02", "dev", 5, "X = '1'"))
+        self.assertFalse(FakeSAP.calls)
+
+    def test_dev_limits(self):
+        self.assertIn("больше лимита", srv.read_table_data("E071", "dev", 5000, "GJAHR = '2026'", "BELNR"))
+        self.assertFalse(FakeSAP.calls)
+
+
+class SearchTests(Base):
+    def test_search_reads_texts_from_dd02t(self):
+        out = srv.search_tables("zmm*")
+        self.assertIn("**ZMM_A** [TRANSP]: Таблица А", out)      # русский текст в приоритете
+        self.assertIn("**ZMM_B** [INTTAB]: Structure | B", out)  # разделитель внутри текста не ломает разбор
+        self.assertNotIn("ZSD_C", out)
+        self.assertNotIn("FIELD_NOT_VALID", out)
+
+    def test_search_limit_and_not_found(self):
+        self.assertIn("достигнут max_results=1", srv.search_tables("Z*", max_results=1))
+        self.assertIn("не найдены", srv.search_tables("YY*"))
+
+    def test_search_rejects_bad_pattern_without_call(self):
+        self.assertIn("Маска может содержать", srv.search_tables("Z' OR TABNAME LIKE '%"))
+        self.assertIn("max_results", srv.search_tables("Z*", max_results=100000))
+        self.assertIn("max_results", srv.search_tables("Z*", max_results=0))
+        self.assertFalse(FakeSAP.calls)
 
 
 class InlineTests(Base):
