@@ -95,6 +95,15 @@ SAPNWRFC_HOME=C:/nwrfc/nwrfcsdk
 
 Для Python 3.11 замените `py -3.12` на `py -3.11`. Активация venv не требуется. `pip` устанавливает также транзитивные Python-зависимости; системный SAP SDK и C++ runtime устанавливаются отдельно. Диапазоны FastMCP и python-dotenv ограничивают основные версии, но не являются полным lock-файлом.
 
+**Переход с FastMCP 2.x на 4.x** (существующий `.venv`, установленный до этой версии `requirements.txt`). В 4.x пакет `fastmcp` — оболочка, код лежит в `fastmcp-slim`, и оба пишут в папку `fastmcp`. Обычный `pip install -r requirements.txt` поверх 2.x удаляет старый пакет после установки нового и стирает его файлы: импорт падает с `cannot import name 'FastMCP' from 'fastmcp' (unknown location)`. Сначала удалите старую версию:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip uninstall -y fastmcp
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Если импорт уже сломан, переустановите `fastmcp-slim` поверх: `.\.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps fastmcp-slim==<версия fastmcp>`.
+
 В `.env` заполните адрес, номер инстанции, мандант, пользователя и пароль **для обеих систем**. `SAPNWRFC_HOME` указывает на корень SDK, а не на `lib`. Не используйте демонстрационные адреса из примера. Значения с `#` или пробелами заключайте в кавычки. `.env` читается рядом со скриптом независимо от рабочего каталога; уже заданные переменные окружения имеют приоритет.
 
 Проверка загрузки зависимостей без подключения к SAP:

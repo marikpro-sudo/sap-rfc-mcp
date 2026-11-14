@@ -1,5 +1,6 @@
 # Direct runtime dependencies; pip installs their transitive dependencies.
-fastmcp>=2.10,<3
+# FastMCP 4.x: the code lives in fastmcp-slim; see README before upgrading from 2.x.
+fastmcp>=4.2,<5
 python-dotenv>=1.0,<2
 # Exact pin required: upstream releases are yanked (no longer maintained).
 pyrfc==3.3.1
